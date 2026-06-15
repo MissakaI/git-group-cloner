@@ -40,74 +40,220 @@ filter_json_with_jq() {
     jq -r "$jq_query"
 }
 
-# Argument parsing function
-parse_arguments() {
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
-    # parse command line options using getopt
-    if ! options=$(getopt -o h --long help,flatten,git-args:,dest-dir:,threads:,use-ssh -n 'git-group-cloner' -- "$@"); then
-        error "$ERROR_PARSING"
+append_comma_list() {
+    current=$1
+    value=$2
+
+    if [ -z "$current" ]; then
+        printf '%s' "$value"
+    elif [ -n "$value" ]; then
+        printf '%s,%s' "$current" "$value"
+    else
+        printf '%s' "$current"
+    fi
+}
+
+is_in_comma_list() {
+    needle=$1
+    list=$2
+
+    if [ -z "$needle" ] || [ -z "$list" ]; then
+        return 1
     fi
 
-    # set positional parameters
-    eval set -- "$options"
+    normalized_list=$(printf '%s' "$list" | sed 's/[[:space:]]*,[[:space:]]*/,/g; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    case ",$normalized_list," in
+    *,"$needle",*)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
 
+is_excluded_subgroup() {
+    subgroup=$1
+    excluded_subgroups=$2
+
+    if [ -z "$excluded_subgroups" ]; then
+        return 1
+    fi
+
+    subgroup_id=$(printf '%s' "$subgroup" | jq -r '.id // empty')
+    subgroup_name=$(printf '%s' "$subgroup" | jq -r '.name // empty')
+    subgroup_path=$(printf '%s' "$subgroup" | jq -r '.path // empty')
+    subgroup_full_path=$(printf '%s' "$subgroup" | jq -r '.full_path // empty')
+
+    is_in_comma_list "$subgroup_id" "$excluded_subgroups" ||
+        is_in_comma_list "$subgroup_name" "$excluded_subgroups" ||
+        is_in_comma_list "$subgroup_path" "$excluded_subgroups" ||
+        is_in_comma_list "$subgroup_full_path" "$excluded_subgroups"
+}
+
+is_excluded_project() {
+    project=$1
+    excluded_projects=$2
+
+    if [ -z "$excluded_projects" ]; then
+        return 1
+    fi
+
+    project_id=$(printf '%s' "$project" | jq -r '.id // empty')
+    project_name=$(printf '%s' "$project" | jq -r '.name // empty')
+    project_path=$(printf '%s' "$project" | jq -r '.path // empty')
+    project_path_with_namespace=$(printf '%s' "$project" | jq -r '.path_with_namespace // empty')
+    project_full_name=$(printf '%s' "$project" | jq -r '.full_name // empty')
+
+    is_in_comma_list "$project_id" "$excluded_projects" ||
+        is_in_comma_list "$project_name" "$excluded_projects" ||
+        is_in_comma_list "$project_path" "$excluded_projects" ||
+        is_in_comma_list "$project_path_with_namespace" "$excluded_projects" ||
+        is_in_comma_list "$project_full_name" "$excluded_projects"
+}
+
+# Argument parsing function
+parse_arguments() {
     # Set default values for options
     flatten=false
     git_args=''
     dest_dir=''
     threads=4
     use_ssh=false
+    latest_branch=false
+    excluded_subgroups=''
+    excluded_projects=''
+    positional_count=0
 
     # process options
-    while true; do
+    while [ $# -gt 0 ]; do
         case $1 in
         --flatten)
             flatten=true
             shift
             ;;
         --git-args)
+            if [ $# -lt 2 ]; then
+                error "$ERROR_PARSING"
+            fi
             git_args="$2"
             shift 2
             ;;
+        --git-args=*)
+            git_args=${1#*=}
+            shift
+            ;;
         --dest-dir)
+            if [ $# -lt 2 ]; then
+                error "$ERROR_PARSING"
+            fi
             dest_dir="$2"
             shift 2
             ;;
+        --dest-dir=*)
+            dest_dir=${1#*=}
+            shift
+            ;;
         --threads)
+            if [ $# -lt 2 ]; then
+                error "$ERROR_PARSING"
+            fi
             threads="$2"
             shift 2
+            ;;
+        --threads=*)
+            threads=${1#*=}
+            shift
             ;;
         --use-ssh)
             use_ssh=true
             shift
             ;;
+        --latest-branch)
+            latest_branch=true
+            shift
+            ;;
+        --exclude-subgroups)
+            if [ $# -lt 2 ]; then
+                error "$ERROR_PARSING"
+            fi
+            excluded_subgroups=$(append_comma_list "$excluded_subgroups" "$2")
+            shift 2
+            ;;
+        --exclude-subgroups=*)
+            excluded_subgroups=$(append_comma_list "$excluded_subgroups" "${1#*=}")
+            shift
+            ;;
+        --exclude-projects)
+            if [ $# -lt 2 ]; then
+                error "$ERROR_PARSING"
+            fi
+            excluded_projects=$(append_comma_list "$excluded_projects" "$2")
+            shift 2
+            ;;
+        --exclude-projects=*)
+            excluded_projects=$(append_comma_list "$excluded_projects" "${1#*=}")
+            shift
+            ;;
         -h | --help)
-            log 'Usage: git-group-cloner platform list|clone <group_name_or_id> [--flatten] [--git-args <git-arguments>] [--dest-dir <destination_directory>] [--threads <number_of_threads>] [--use-ssh]'
+            log 'Usage: git-group-cloner platform list|clone <group_name_or_id> [--flatten] [--git-args <git-arguments>] [--dest-dir <destination_directory>] [--threads <number_of_threads>] [--use-ssh] [--latest-branch] [--exclude-subgroups <subgroup-list>] [--exclude-projects <project-list>]'
             exit 0
             ;;
         --)
             shift
             break
             ;;
-        *)
+        -*)
             error "$ERROR_PARSING"
+            ;;
+        *)
+            positional_count=$((positional_count + 1))
+            case $positional_count in
+            1)
+                platform=$1
+                ;;
+            2)
+                action=$1
+                ;;
+            3)
+                group_name_or_id=$1
+                ;;
+            *)
+                error "$ERROR_PARSING"
+                ;;
+            esac
+            shift
             ;;
         esac
     done
 
+    while [ $# -gt 0 ]; do
+        positional_count=$((positional_count + 1))
+        case $positional_count in
+        1)
+            platform=$1
+            ;;
+        2)
+            action=$1
+            ;;
+        3)
+            group_name_or_id=$1
+            ;;
+        *)
+            error "$ERROR_PARSING"
+            ;;
+        esac
+        shift
+    done
+
     # Get the platform and action (list or clone)
-    if [ $# -lt 3 ]; then
+    if [ "$positional_count" -lt 3 ]; then
         error 'Error: platform, action and group name or ID are required'
     fi
-
-    # set platform
-    platform=$1
-
-    # set action
-    action=$2
-
-    # set group name / id
-    group_name_or_id=$3
 
     # check if platform is supported
     if [ "$platform" != 'gitlab' ] && [ "$platform" != 'github' ]; then
@@ -405,6 +551,8 @@ list_entity_items() {
     entity_id="$2"
     token="$3"
     type="$4"
+    list_item_excluded_subgroups="$5"
+    list_item_excluded_projects="$6"
 
     response=$(make_api_request "$platform" "$entity_id" "$type" "$token")
     items=$(printf '%s' "$response" | jq -c '.[]')
@@ -435,18 +583,28 @@ list_entity_items() {
         else
             prefix="Subgroup"
         fi
+        if [ "$prefix" = "Subgroup" ] && is_excluded_subgroup "$item" "$list_item_excluded_subgroups"; then
+            continue
+        fi
+        if [ "$prefix" = "Project" ]; then
+            if is_in_comma_list "$item_id" "$list_item_excluded_projects" ||
+                is_in_comma_list "$item_name" "$list_item_excluded_projects" ||
+                is_excluded_project "$item" "$list_item_excluded_projects"; then
+                continue
+            fi
+        fi
         printf '%s\n' "${prefix} - $item_id - $item_name"
     done
 }
 
 # List all projects for a given group ID
 list_entity_projects() {
-    list_entity_items "$@" projects
+    list_entity_items "$1" "$2" "$3" projects "" "$4"
 }
 
 # List all subgroups for a given group ID
 list_entity_subgroups() {
-    list_entity_items "$@" subgroups
+    list_entity_items "$1" "$2" "$3" subgroups "$4" ""
 }
 
 # List either subgroups or projects, or both for a given entity
@@ -455,14 +613,16 @@ list_entity() {
     platform=$1
     entity_id=$2
     token="$3"
-    type_=${4:-both}
+    list_entity_type=${4:-both}
+    list_entity_excluded_subgroups="$5"
+    list_entity_excluded_projects="$6"
 
     #log "list_entity $platform $entity_id $type_"
-    if [ "$type_" = 'subgroups' ] || [ "$type_" = 'both' ]; then
-        list_entity_subgroups "$platform" "$entity_id" "$token"
+    if [ "$list_entity_type" = 'subgroups' ] || [ "$list_entity_type" = 'both' ]; then
+        list_entity_subgroups "$platform" "$entity_id" "$token" "$list_entity_excluded_subgroups"
     fi
-    if [ "$type_" = 'projects' ] || [ "$type_" = 'both' ]; then
-        list_entity_projects "$platform" "$entity_id" "$token"
+    if [ "$list_entity_type" = 'projects' ] || [ "$list_entity_type" = 'both' ]; then
+        list_entity_projects "$platform" "$entity_id" "$token" "$list_entity_excluded_projects"
     fi
 }
 
@@ -503,6 +663,8 @@ list_github_org() {
 #   platform: the platform to retrieve the projects from (either "gitlab" or "github")
 #   entity_id: the identifier of the entity to retrieve projects from (either a name or an ID, depending on the platform)
 #   use_ssh: a boolean indicating whether to use SSH URLs for the projects (true) or HTTP URLs (false)
+#   excluded_subgroups: a comma-separated list of GitLab subgroup IDs, names, paths, or full paths to skip
+#   excluded_projects: a comma-separated list of project IDs, names, paths, or full paths to skip
 #   token: the authentication token to use for the API requests
 #
 # Returns:
@@ -512,10 +674,21 @@ get_projects() {
     platform="$1"
     entity_id="$2"
     use_ssh="$3"
-    token="$4"
+    excluded_subgroups="$4"
+    excluded_projects="$5"
+    token="$6"
 
     if ! response=$(make_api_request "$platform" "$entity_id" "projects" "$token"); then
         error "$response"
+    fi
+
+    if [ -n "$excluded_projects" ]; then
+        response=$(printf '%s\n' "$response" | jq -c '.[]' | while read -r project; do
+            if is_excluded_project "$project" "$excluded_projects"; then
+                continue
+            fi
+            printf '%s\n' "$project"
+        done | jq -s '.')
     fi
 
     # Determine the jq query to use, based on the platform and the use_ssh argument.
@@ -539,17 +712,20 @@ get_projects() {
     if [ "$platform" = 'gitlab' ]; then
         response=$(make_api_request "$platform" "$entity_id" "subgroups" "$token")
 
-        # Read the subgroup ids from the response and store them in a string separated by newline characters.
-        subgroup_ids=$(printf '%s\n' "$response" | filter_json_with_jq '.[].id' | tr '\n' ' ')
+        subgroups=$(printf '%s\n' "$response" | jq -c '.[]')
 
         # Stop looping if subgroup_ids is empty
-        if [ -z "$subgroup_ids" ]; then
+        if [ -z "$subgroups" ]; then
             return
         fi
 
         # Loop over the subgroup ids and call the get_projects function recursively for each subgroup.
-        for subgroup_id in $subgroup_ids; do
-            get_projects "$platform" "$subgroup_id" "$use_ssh" "$token"
+        printf '%s\n' "$subgroups" | while read -r subgroup; do
+            if is_excluded_subgroup "$subgroup" "$excluded_subgroups"; then
+                continue
+            fi
+            subgroup_id=$(printf '%s' "$subgroup" | jq -r '.id')
+            get_projects "$platform" "$subgroup_id" "$use_ssh" "$excluded_subgroups" "$excluded_projects" "$token"
         done
     fi
 }
@@ -584,7 +760,9 @@ run_commands() {
     done
   # If the number of threads is greater than 1, execute the commands in parallel
   else
-    xargs -P "$threads" -I {} sh -c "{}" || exit 1
+    while read -r cmd; do
+      printf '%s\0' "$cmd"
+    done | xargs -0 -n 1 -P "$threads" sh -c 'eval "$1"' sh || exit 1
   fi
 }
 
@@ -599,10 +777,12 @@ run_git_clones() {
     cloning="$3"
     threads="$4"
     flatten="$5"
+    latest_branch="$6"
 
     while read -r line; do
         url=${line%'|'*}
         repo_name=${url##*/}
+        repo_name=${repo_name%.git}
         namespace_path=${line#*'|'}
         if [ "$flatten" = "true" ]; then
             dest_path="$dest_dir/$repo_name"
@@ -610,8 +790,16 @@ run_git_clones() {
             dest_path="$dest_dir/$namespace_path/$repo_name"
         fi
 
+        quoted_url=$(shell_quote "$url")
+        quoted_dest_path=$(shell_quote "$dest_path")
+        clone_cmd="if [ -e $quoted_dest_path ]; then printf '%s\n' 'Skipping existing destination: $dest_path' >&2; else git clone $git_args $quoted_url $quoted_dest_path"
+        if [ "$latest_branch" = "true" ]; then
+            clone_cmd="$clone_cmd && latest_branch=\$(git -C $quoted_dest_path for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin | sed '/^origin\/HEAD$/d' | sed 's|^origin/||' | head -n 1); if [ -n \"\$latest_branch\" ]; then git -C $quoted_dest_path switch \"\$latest_branch\" >/dev/null 2>&1 || git -C $quoted_dest_path switch --track \"origin/\$latest_branch\"; fi"
+        fi
+        clone_cmd="$clone_cmd; fi"
+
         # Generate the 'git clone' command for each repository
-        echo "git clone $git_args $url $dest_path"
+        printf '%s\n' "$clone_cmd"
     done | run_commands "$threads"
 }
 
@@ -624,16 +812,14 @@ clone_projects() {
     git_args=$5
     dest_dir=$6
     threads=$7
-    token="$8"
+    latest_branch=$8
+    excluded_subgroups=$9
+    excluded_projects="${10}"
+    token="${11}"
 
     # Check if destination directory exists, and create it if it does not exist
     if [ ! -d "$dest_dir" ]; then
         mkdir -p "$dest_dir"
-    fi
-
-    # Check if destination directory is empty, and exit with an error message if it is not
-    if [ "$(ls -A "$dest_dir")" ]; then
-        error "Error: destination directory '$dest_dir' is not empty"
     fi
 
     if [ "$threads" -le 1 ] || [ "$PARALLEL_TOOL" = "none" ]; then
@@ -647,8 +833,8 @@ clone_projects() {
     #cloning="parallel_rargs"
 
     # Get the list of projects and pass each project to run_git_clones
-    get_projects "$platform" "$entity_id" "${use_ssh}" "${token}" |
-        run_git_clones "$git_args" "$dest_dir" "$cloning" "$threads" "$flatten"
+    get_projects "$platform" "$entity_id" "${use_ssh}" "$excluded_subgroups" "$excluded_projects" "${token}" |
+        run_git_clones "$git_args" "$dest_dir" "$cloning" "$threads" "$flatten" "$latest_branch"
 
 }
 
@@ -658,7 +844,10 @@ main() {
     action="$2"
     group_name_or_id="$3"
     use_ssh="$4"
-    token="$5"
+    latest_branch="$5"
+    excluded_subgroups="$6"
+    excluded_projects="$7"
+    token="$8"
 
     # Call the dependency check function
     check_dependencies "${platform}" "${token}"
@@ -672,12 +861,12 @@ main() {
     fi
 
     if [ "$action" = 'list' ]; then
-        list_entity "$platform" "$entity_id" "$token"
+        list_entity "$platform" "$entity_id" "$token" both "$excluded_subgroups" "$excluded_projects"
     elif [ "$action" = 'clone' ]; then
         if [ -z "$entity_id" ]; then
             error 'Error: group ID is required'
         fi
-        clone_projects "$platform" "$entity_id" "$use_ssh" "$flatten" "$git_args" "$dest_dir" "$threads" "$token"
+        clone_projects "$platform" "$entity_id" "$use_ssh" "$flatten" "$git_args" "$dest_dir" "$threads" "$latest_branch" "$excluded_subgroups" "$excluded_projects" "$token"
     else
         error "$ERROR_UNSUPPORTED_ACTION"
     fi
@@ -694,5 +883,5 @@ if [ "$0" = "${BASH_SOURCE:-$0}" ]; then
     parse_arguments "$@"
 
     # call main function
-    main "$platform" "$action" "$group_name_or_id" "$use_ssh" "$TOKEN"
+    main "$platform" "$action" "$group_name_or_id" "$use_ssh" "$latest_branch" "$excluded_subgroups" "$excluded_projects" "$TOKEN"
 fi

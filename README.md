@@ -32,7 +32,12 @@ To set the `TOKEN` environment variable, you can use the following command:
 export TOKEN=<private_token>
 ```
 
-Replace `<private_token>` with your private token or access token. You can obtain a private token or access token from the GitLab or GitHub website (see the [FAQ](#faq)).
+Replace `<private_token>` with your private token or access token. The token is only used for API discovery; actual cloning is performed by `git clone`, which uses your normal Git credentials, credential helper, or SSH keys.
+
+Required scopes:
+
+- GitLab: use a token with `read_api` for discovery.
+- GitHub: use a personal access token that can list the target user or organization repositories. Private repository visibility depends on the token permissions.
 
 ### Cloning Projects
 
@@ -41,7 +46,7 @@ Once you have set the `TOKEN` environment variable, you can use `git-group-clone
 ## Usage
 
 ```sh
-git-group-cloner [platform] [list|clone] [--flatten] [--git-args <git-arguments>] [--dest-dir <destination_directory>] [--threads <number_of_threads>] [--use-ssh]
+git-group-cloner [platform] [list|clone] [--flatten] [--git-args <git-arguments>] [--dest-dir <destination_directory>] [--threads <number_of_threads>] [--use-ssh] [--latest-branch] [--exclude-subgroups <subgroup-list>] [--exclude-projects <project-list>]
 ```
 
 ### Options
@@ -51,9 +56,12 @@ git-group-cloner [platform] [list|clone] [--flatten] [--git-args <git-arguments>
 - `clone`: clone all projects in the group.
 - `--flatten`: flatten the subgroups structure.
 - `--git-args <git-arguments>`: pass arguments to `git clone`.
-- `--dest-dir <destination_directory>`: specify the destination directory for cloning projects.
+- `--dest-dir <destination_directory>`: specify the destination directory for cloning projects. The directory may already contain files; repositories whose target path already exists are skipped.
 - `--threads <number_of_threads>`: specify the number of cloning threads (default: 4).
 - `--use-ssh`: Switch the cloning method from the default HTTPS to SSH.
+- `--latest-branch`: after cloning each project, switch to the remote branch with the latest commit.
+- `--exclude-subgroups <subgroup-list>`: skip selected GitLab subgroups while still processing other subgroups. Match by subgroup ID, name, path, or full path; separate values with commas.
+- `--exclude-projects <project-list>`: skip selected projects while still processing other projects. Match by project ID, name, path, path with namespace, or full name; separate values with commas.
 
 ### Examples
 
@@ -93,6 +101,24 @@ git-group-cloner gitlab clone --git-args "--depth 1 --branch dev" <group_id>
 git-group-cloner github clone --threads 2 <group_id>
 ```
 
+#### Clone all projects and switch each repository to its most recently updated branch
+
+```sh
+git-group-cloner gitlab clone --latest-branch <group_id>
+```
+
+#### Clone a GitLab group while skipping selected subgroups
+
+```sh
+git-group-cloner gitlab clone --exclude-subgroups legacy,archive <group_id>
+```
+
+#### Clone a group while skipping selected projects
+
+```sh
+git-group-cloner gitlab clone --exclude-projects old-api,group/tools/deprecated <group_id>
+```
+
 ### Clone all projects in a self-hosted GitLab group
 
 ```sh
@@ -119,11 +145,11 @@ git-group-cloner github clone <group_id>
 
 ### How do I get my private token for GitLab?
 
-You can get your private token from your GitLab account settings. Go to your profile settings, then access the "Access Tokens" section, and create a new token with the desired scope.
+You can get your private token from your GitLab account settings. Go to your profile settings, then access the "Access Tokens" section, and create a token with `read_api`.
 
 ### How do I get my access token for GitHub?
 
-You can get your access token from your GitHub account settings. Go to your settings, then access the "Developer settings", and click on "Personal access tokens". Create a new token with the desired scope.
+You can get your access token from your GitHub account settings. Go to your settings, then access "Developer settings", and click "Personal access tokens". Grant read access to the repositories you want to list and clone.
 
 ### How do I get `jq`?
 
